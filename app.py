@@ -19,24 +19,27 @@ from streamlit_webrtc import (
 
 TELEGRAM_BOT_TOKEN = "8702324957:AAE45czlrbs5nt9q7uxxwgukArUpNjoZ-j0"
 TELEGRAM_CHAT_ID   = "-1003964944926"
-RTC_CONFIGURATION = RTCConfiguration({
-    "iceServers": [
+def _get_rtc_config():
+    """Build RTC config — uses Metered TURN if API key is set, falls back to STUN only."""
+    ice_servers = [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:openrelay.metered.ca:80"]},
-        {
-            "urls": ["turn:openrelay.metered.ca:80"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
-        {
-            "urls": ["turn:openrelay.metered.ca:443"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
     ]
-})
+    try:
+        api_key = st.secrets.get("METERED_API_KEY", "") or os.getenv("METERED_API_KEY", "")
+        if api_key:
+            import requests as _r
+            resp = _r.get(
+                f"https://focus-guardian.metered.live/api/v1/turn/credentials?apiKey={api_key}",
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                ice_servers = resp.json()
+    except Exception:
+        pass
+    return RTCConfiguration({"iceServers": ice_servers})
+
+RTC_CONFIGURATION = _get_rtc_config()
 
 EAR_THRESHOLD       = 0.20
 EAR_CONSEC_FRAMES   = 3
