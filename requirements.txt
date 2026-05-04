@@ -1,6 +1,6 @@
 streamlit
 opencv-python-headless
-mediapipe==0.10.9
+mediapipe
 numpy
 plotly
 streamlit-webrtc==0.47.1
