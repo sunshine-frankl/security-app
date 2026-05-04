@@ -1,6 +1,7 @@
 import os
-os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
-os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1" 
+os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+os.environ["MESA_GL_VERSION_OVERRIDE"] = "3.3"
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -68,12 +69,22 @@ def iris_ratio(lm, iris_idx, eye_left_idx, eye_right_idx, w, h):
 # ── Cached resources ───────────────────────────────────────────────────────────
 # FaceMesh создаётся в потоке webrtc — НЕ используем st.cache_resource
 def make_face_mesh():
-    return mp.solutions.face_mesh.FaceMesh(
-        max_num_faces=4,
-        refine_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
+    try:
+        # mediapipe 0.10.x — solutions API
+        return mp.solutions.face_mesh.FaceMesh(
+            max_num_faces=4,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+    except AttributeError:
+        # mediapipe 0.11+ — new API
+        from mediapipe.tasks.python import vision
+        from mediapipe.tasks.python.vision import FaceLandmarker, FaceLandmarkerOptions
+        raise RuntimeError(
+            "mediapipe >= 0.11 is not supported. "
+            "Pin to mediapipe==0.10.9 in requirements.txt"
+        )
 
 @st.cache_resource
 def load_yolo():
