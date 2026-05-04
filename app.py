@@ -20,26 +20,35 @@ from streamlit_webrtc import (
 TELEGRAM_BOT_TOKEN = "8702324957:AAE45czlrbs5nt9q7uxxwgukArUpNjoZ-j0"
 TELEGRAM_CHAT_ID   = "-1003964944926"
 def _get_rtc_config():
-    """Build RTC config — uses Metered TURN if API key is set, falls back to STUN only."""
-    ice_servers = [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-    ]
+    """Build RTC config using Metered TURN credentials from secrets."""
     try:
-        api_key = st.secrets.get("METERED_API_KEY", "") or os.getenv("METERED_API_KEY", "")
-        if api_key:
-            import requests as _r
-            resp = _r.get(
-                f"https://focus-guardian.metered.live/api/v1/turn/credentials?apiKey={api_key}",
-                timeout=5,
-            )
-            if resp.status_code == 200:
-                ice_servers = resp.json()
+        username   = st.secrets.get("METERED_USERNAME", "") or os.getenv("METERED_USERNAME", "")
+        credential = st.secrets.get("METERED_CREDENTIAL", "") or os.getenv("METERED_CREDENTIAL", "")
     except Exception:
-        pass
+        username, credential = "", ""
+
+    if username and credential:
+        ice_servers = [
+            {"urls": ["stun:stun.relay.metered.ca:80"]},
+            {"urls": ["turn:global.relay.metered.ca:80"],
+             "username": username, "credential": credential},
+            {"urls": ["turn:global.relay.metered.ca:80?transport=tcp"],
+             "username": username, "credential": credential},
+            {"urls": ["turn:global.relay.metered.ca:443"],
+             "username": username, "credential": credential},
+            {"urls": ["turn:global.relay.metered.ca:443?transport=tcp"],
+             "username": username, "credential": credential},
+        ]
+    else:
+        # Fallback — STUN only (works on local network)
+        ice_servers = [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+        ]
     return RTCConfiguration({"iceServers": ice_servers})
 
-RTC_CONFIGURATION = _get_rtc_config()
+# Evaluated lazily inside pages so st.secrets is available
+RTC_CONFIGURATION = None  # will be set on first use
 
 EAR_THRESHOLD       = 0.20
 EAR_CONSEC_FRAMES   = 3
@@ -682,7 +691,7 @@ def student_page():
         ctx = webrtc_streamer(
             key=f"student_{eid}",
             mode=WebRtcMode.SENDRECV,
-            rtc_configuration=RTC_CONFIGURATION,
+            rtc_configuration=_get_rtc_config(),
             media_stream_constraints={"video": True, "audio": False},
             video_processor_factory=FocusProcessor,
             async_processing=True,
