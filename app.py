@@ -1,3 +1,6 @@
+import os
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
+os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1" 
 import cv2
 import mediapipe as mp
 import numpy as np
