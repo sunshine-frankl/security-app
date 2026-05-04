@@ -1,0 +1,11 @@
+streamlit
+opencv-python-headless
+mediapipe==0.10.9
+numpy
+plotly
+streamlit-webrtc==0.47.1
+aiortc
+av
+requests
+ultralytics
+tornado
