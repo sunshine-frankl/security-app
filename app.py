@@ -19,7 +19,24 @@ from streamlit_webrtc import (
 
 TELEGRAM_BOT_TOKEN = "8702324957:AAE45czlrbs5nt9q7uxxwgukArUpNjoZ-j0"
 TELEGRAM_CHAT_ID   = "-1003964944926"
-RTC_CONFIGURATION  = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+RTC_CONFIGURATION = RTCConfiguration({
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:openrelay.metered.ca:80"]},
+        {
+            "urls": ["turn:openrelay.metered.ca:80"],
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        },
+        {
+            "urls": ["turn:openrelay.metered.ca:443"],
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        },
+    ]
+})
 
 EAR_THRESHOLD       = 0.20
 EAR_CONSEC_FRAMES   = 3
@@ -90,9 +107,15 @@ def make_face_mesh():
 def load_yolo():
     try:
         from ultralytics import YOLO
-        return YOLO(YOLO_MODEL)
+        import os
+        # Pre-download model to avoid timeout during WebRTC handshake
+        model = YOLO(YOLO_MODEL)
+        return model
     except Exception:
         return None
+
+# Pre-download YOLO at app startup (not inside webrtc thread)
+_yolo_preload = load_yolo()
 
 try:
     import requests as _req
