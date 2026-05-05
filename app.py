@@ -708,8 +708,7 @@ def student_page():
             video_processor_factory=FocusProcessor,
             async_processing=True,
         )
-        st.divider()
-        chart_container = st.container()
+
 
     with col_side:
         metrics_container = st.container()
@@ -752,28 +751,7 @@ def student_page():
                 else:
                     st.success("No violations ✅")
 
-                # Chart
-                fs = d["focus_scores"]
-                if len(fs) > 2:
-                    with chart_container:
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            y=fs, mode="lines",
-                            line=dict(color="#00ff9d", width=2.5),
-                            fill="tozeroy", fillcolor="rgba(0,255,157,0.08)"))
-                        fig.add_hline(y=78, line_color="rgba(0,255,157,0.3)", line_dash="dot")
-                        fig.add_hline(y=55, line_color="rgba(255,204,0,0.3)",  line_dash="dot")
-                        fig.update_layout(
-                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                            height=200, showlegend=False,
-                            margin=dict(l=0,r=0,t=8,b=0),
-                            yaxis=dict(range=[0,100], ticksuffix="%",
-                                       gridcolor="rgba(255,255,255,0.05)",
-                                       tickfont=dict(color="#aaa")),
-                            xaxis=dict(showgrid=False, showticklabels=False),
-                        )
-                        st.plotly_chart(fig, use_container_width=True,
-                                        key=f"sc_{int(time.time())}")
+
             else:
                 c1, c2 = st.columns(2)
                 c1.metric("🎯 Focus",      "—")
