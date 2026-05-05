@@ -55,9 +55,9 @@ EAR_CONSEC_FRAMES   = 3
 GAZE_THRESHOLD      = 0.12   # iris offset ratio to trigger left/right
 MAX_BLINK_RATE      = 25
 YOLO_MODEL          = "yolov8n.pt"
-YOLO_EVERY_N_FRAMES = 5
-YOLO_IMG_SIZE       = 416
-YOLO_CONF           = 0.45
+YOLO_EVERY_N_FRAMES = 15   # less frequent = less CPU
+YOLO_IMG_SIZE       = 224   # smaller = faster
+YOLO_CONF           = 0.50
 SUSPICIOUS_OBJECTS  = {"cell phone", "book", "remote", "laptop", "tv"}
 VIOLATION_COOLDOWN  = 15.0
 GAZE_GRACE_SEC      = 2.5
@@ -212,8 +212,17 @@ class FocusProcessor(VideoProcessorBase):
         h, w = img.shape[:2]
         with self._lock: settings = self.settings.copy()
 
-        # MediaPipe работает с RGB
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # Resize to 480p for processing — keeps stream full-res
+        scale = min(1.0, 480 / max(h, w))
+        if scale < 1.0:
+            proc = cv2.resize(img, (int(w*scale), int(h*scale)))
+        else:
+            proc = img
+        ph, pw = proc.shape[:2]
+        ph, pw = proc.shape[:2]
+
+        # MediaPipe работает с RGB на уменьшенном кадре
+        rgb = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb)
 
         faces_count  = len(results.multi_face_landmarks) if results.multi_face_landmarks else 0
@@ -229,26 +238,25 @@ class FocusProcessor(VideoProcessorBase):
                 lm = face_lm.landmark
 
                 # ── Bounding box (только в ann) ────────────────────────────
+                # Scale landmarks back to original frame coords
                 xs = [int(l.x * w) for l in lm]
                 ys = [int(l.y * h) for l in lm]
                 x1, y1, x2, y2 = max(0,min(xs)-8), max(0,min(ys)-8), \
                                   min(w,max(xs)+8), min(h,max(ys)+8)
                 cv2.rectangle(ann, (x1,y1), (x2,y2), (0,255,120), 2)
 
-                # ── Точки глаз (только в ann) ──────────────────────────────
                 for idx in L_EAR_IDX + R_EAR_IDX:
                     px, py = int(lm[idx].x*w), int(lm[idx].y*h)
                     cv2.circle(ann, (px,py), 2, (0,255,255), -1)
 
-                # ── Радужки (только в ann) ─────────────────────────────────
                 for iris_idx in [L_IRIS_IDX, R_IRIS_IDX]:
                     ix = int(lm[iris_idx].x * w)
                     iy = int(lm[iris_idx].y * h)
                     cv2.circle(ann, (ix,iy), 5, (255,80,80), -1)
 
-                # ── EAR / blink ────────────────────────────────────────────
-                l_ear = ear(lm, L_EAR_IDX, w, h)
-                r_ear = ear(lm, R_EAR_IDX, w, h)
+                # EAR uses proc dimensions (normalized lm * proc size)
+                l_ear = ear(lm, L_EAR_IDX, pw, ph)
+                r_ear = ear(lm, R_EAR_IDX, pw, ph)
                 avg_ear = (l_ear + r_ear) / 2.0
                 if avg_ear < EAR_THRESHOLD:
                     self.frame_counter += 1
@@ -260,8 +268,8 @@ class FocusProcessor(VideoProcessorBase):
                     self.frame_counter = 0
 
                 # ── Gaze ───────────────────────────────────────────────────
-                l_ratio = iris_ratio(lm, L_IRIS_IDX, L_EYE_LEFT, L_EYE_RIGHT, w, h)
-                r_ratio = iris_ratio(lm, R_IRIS_IDX, R_EYE_LEFT, R_EYE_RIGHT, w, h)
+                l_ratio = iris_ratio(lm, L_IRIS_IDX, L_EYE_LEFT, L_EYE_RIGHT, pw, ph)
+                r_ratio = iris_ratio(lm, R_IRIS_IDX, R_EYE_LEFT, R_EYE_RIGHT, pw, ph)
                 avg_ratio = (l_ratio + r_ratio) / 2.0
                 self._gaze_buf.append(avg_ratio)
                 smooth = sum(self._gaze_buf) / len(self._gaze_buf)
@@ -287,7 +295,7 @@ class FocusProcessor(VideoProcessorBase):
             if self.yolo_cnt >= YOLO_EVERY_N_FRAMES:
                 self.yolo_cnt = 0
                 try:
-                    res = self.yolo.predict(img, imgsz=YOLO_IMG_SIZE, conf=YOLO_CONF, verbose=False)
+                    res = self.yolo.predict(proc, imgsz=YOLO_IMG_SIZE, conf=YOLO_CONF, verbose=False)
                     self.yolo_objects = []
                     if res and res[0].boxes is not None:
                         for box, cf, cid in zip(res[0].boxes.xyxy.cpu().numpy(),
@@ -296,8 +304,12 @@ class FocusProcessor(VideoProcessorBase):
                             name = self.yolo.names.get(int(cid), str(cid))
                             if name in SUSPICIOUS_OBJECTS:
                                 bx1,by1,bx2,by2 = box.astype(int)
+                                # Scale back to original frame
+                                if scale < 1.0:
+                                    bx1=int(bx1/scale); by1=int(by1/scale)
+                                    bx2=int(bx2/scale); by2=int(by2/scale)
                                 self.yolo_objects.append({"class":name,"conf":float(cf),
-                                                          "box":(int(bx1),int(by1),int(bx2),int(by2))})
+                                                          "box":(bx1,by1,bx2,by2)})
                 except Exception: pass
             for obj in self.yolo_objects:
                 bx1,by1,bx2,by2 = obj["box"]
