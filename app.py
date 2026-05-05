@@ -780,37 +780,47 @@ def student_page():
                 </div>""", unsafe_allow_html=True)
         return
 
-    # ── Exam selection if multiple ─────────────────────────────────────────────
     import datetime as dt
+    now_str    = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    active_key = f"active_exam_{uname}"
 
-    if len(my_exams) > 1:
-        st.subheader("You have multiple exams assigned. Select one to start:")
-        sel_key = f"selected_exam_{uname}"
-        options = {eid: ex["title"] for eid, ex in my_exams.items()}
-
-        # Check deadlines — mark expired
-        now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    # ── Exam selection if multiple ─────────────────────────────────────────────
+    if len(my_exams) > 1 and active_key not in st.session_state:
+        st.subheader("Select an exam to start:")
+        options = {}
         for eid_opt, ex_opt in my_exams.items():
-            dl = ex_opt.get("deadline")
-            if dl and dl < now_str:
-                options[eid_opt] += " ⚠️ EXPIRED"
+            label = ex_opt["title"]
+            dl    = ex_opt.get("deadline")
+            if dl:
+                label += f"  ·  deadline {dl}"
+                if dl < now_str:
+                    label += " ⚠️ EXPIRED"
+            options[eid_opt] = label
 
-        chosen_eid = st.radio("", list(options.keys()),
-                              format_func=lambda e: options[e],
-                              key=sel_key)
-        if st.button("Open this exam →", type="primary"):
-            st.session_state[f"active_exam_{uname}"] = chosen_eid
+        chosen = st.radio("Available exams", list(options.keys()),
+                           format_func=lambda e: options[e])
+        if st.button("Open →", type="primary"):
+            st.session_state[active_key] = chosen
             st.rerun()
-        return
+        st.stop()   # halt here — don't render exam UI yet
 
-    eid  = st.session_state.get(f"active_exam_{uname}") or next(iter(my_exams))
-    exam = my_exams.get(eid) or next(iter(my_exams.values()))
+    # ── Resolve which exam to open ─────────────────────────────────────────────
+    if active_key in st.session_state:
+        eid  = st.session_state[active_key]
+        exam = my_exams.get(eid)
+        if exam is None:            # exam no longer available
+            del st.session_state[active_key]
+            st.rerun()
+    else:
+        eid, exam = next(iter(my_exams.items()))
 
     # ── Check deadline ─────────────────────────────────────────────────────────
-    now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     if exam.get("deadline") and exam["deadline"] < now_str:
-        st.error(f"⏰ Deadline passed: **{exam['deadline']}**. This exam is no longer available.")
-        return
+        st.error(f"⏰ Deadline passed: **{exam['deadline']}**. Contact your teacher.")
+        if st.button("← Back to exam list"):
+            st.session_state.pop(active_key, None)
+            st.rerun()
+        st.stop()
 
     if exam["status"] == "pending":
         db["exams"][eid]["status"] = "active"
