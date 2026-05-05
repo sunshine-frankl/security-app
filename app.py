@@ -680,6 +680,15 @@ def teacher_page():
 
     # ── Results ───────────────────────────────────────────────────────────────
     with tab_results:
+        # Always reload from file so submitted results appear immediately
+        fresh = _load_db()
+        db.update(fresh)
+
+        col_r1, col_r2 = st.columns([4,1])
+        col_r1.markdown("### 📊 Exam Results")
+        if col_r2.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+
         my_exams = {eid: ex for eid, ex in db["exams"].items()
                     if ex["teacher"] == uname}
         if not my_exams:
@@ -889,15 +898,46 @@ def student_page():
     duration_sec = duration_min * 60
     questions    = exam.get("questions", [])
 
+    # ── Submit helper — defined BEFORE tabs so button can call it ─────────────
+    def _do_submit():
+        ans_key = f"answers_{eid}"
+        # Snapshot processor state
+        if ctx.video_processor:
+            with ctx.video_processor._lock:
+                d_f  = ctx.video_processor.last.copy()
+                vlog = list(ctx.video_processor.violations_log)
+            fs = d_f["focus_scores"]
+        else:
+            d_f  = {"focus_scores": [], "blink_rate": 0}
+            vlog = []
+            fs   = []
+        db["exams"][eid]["result"] = {
+            "avg_focus":    sum(fs)/len(fs) if fs else 0,
+            "min_focus":    min(fs) if fs else 0,
+            "blink_rate":   d_f["blink_rate"],
+            "violations":   len(vlog),
+            "focus_scores": fs[-100:],
+            "answers":      dict(st.session_state.get(ans_key, {})),
+            "duration_s":   int(time.time() - exam_start),
+            "submitted_at": time.strftime("%H:%M:%S"),
+        }
+        db["exams"][eid]["status"] = "submitted"
+        save_db(db)
+        # Reload db from file so all sessions see the update
+        fresh = _load_db()
+        db.update(fresh)
+        st.session_state.pop(ready_key, None)
+        st.session_state.pop(f"active_exam_{uname}", None)
+        st.success("✅ Exam submitted! Your teacher will see the results.")
+        st.rerun()
+
     # Determine which tabs to show
-    tab_labels = ["🎥 Camera", "📊 Metrics"]
-    if questions:
-        tab_labels.append("📝 Test")
+    tab_labels = ["🎥 Camera", "📝 Test", "📊 Metrics"]
     tabs = st.tabs(tab_labels)
 
     tab_cam     = tabs[0]
-    tab_metrics = tabs[1]
-    tab_test    = tabs[2] if questions else None
+    tab_test    = tabs[1]
+    tab_metrics = tabs[2]
 
     with tab_cam:
         col_vid, col_info = st.columns([2.4, 1])
@@ -933,66 +973,37 @@ def student_page():
             _do_submit()
 
     # ── Test tab ───────────────────────────────────────────────────────────────
-    if tab_test and questions:
-        with tab_test:
-            ans_key = f"answers_{eid}"
-            if ans_key not in st.session_state:
-                st.session_state[ans_key] = {}
+    with tab_test:
+        ans_key = f"answers_{eid}"
+        if ans_key not in st.session_state:
+            st.session_state[ans_key] = {}
 
-            if not ctx.state.playing:
-                st.warning("⚠️ Start your camera first (Camera tab → START)")
-            else:
-                st.subheader("📝 Answer the questions")
-                st.caption(f"{len(questions)} questions · answers save automatically")
+        if not questions:
+            st.info("📭 No questions were added to this exam.")
+        elif not ctx.state.playing:
+            st.warning("⚠️ Start your camera first — go to the Camera tab and press START.")
+        else:
+            st.subheader("📝 Answer the questions")
+            st.caption(f"{len(questions)} questions · answers are saved automatically")
+            st.divider()
+
+            for i, q in enumerate(questions):
+                st.markdown(f"**Q{i+1}. {q['text']}**")
+                opts   = [f"{chr(65+j)}. {opt}" for j, opt in enumerate(q["options"])]
+                saved  = st.session_state[ans_key].get(str(i), 0)
+                choice = st.radio("", opts, index=saved,
+                                  key=f"q_{eid}_{i}", horizontal=True,
+                                  label_visibility="collapsed")
+                st.session_state[ans_key][str(i)] = opts.index(choice)
                 st.divider()
 
-                for i, q in enumerate(questions):
-                    st.markdown(f"**Q{i+1}. {q['text']}**")
-                    opts   = [f"{chr(65+j)}. {opt}" for j, opt in enumerate(q["options"])]
-                    saved  = st.session_state[ans_key].get(str(i), 0)
-                    choice = st.radio("", opts, index=saved,
-                                      key=f"q_{eid}_{i}", horizontal=True,
-                                      label_visibility="collapsed")
-                    st.session_state[ans_key][str(i)] = opts.index(choice)
-                    st.divider()
-
-                answered = len(st.session_state[ans_key])
-                st.caption(f"Answered: {answered}/{len(questions)}")
+            answered = len(st.session_state[ans_key])
+            st.caption(f"Answered: {answered}/{len(questions)}")
 
     with tab_metrics:
         metrics_ph = st.empty()
 
-    # ── Pass settings to processor ─────────────────────────────────────────────
-    if ctx.video_processor:
-        ctx.video_processor.update_settings(settings)
 
-    # ── Submit helper (defined after ctx is available) ─────────────────────────
-    def _do_submit():
-        ans_key = f"answers_{eid}"
-        if ctx.video_processor:
-            with ctx.video_processor._lock:
-                d_f  = ctx.video_processor.last.copy()
-                vlog = list(ctx.video_processor.violations_log)
-            fs = d_f["focus_scores"]
-        else:
-            d_f  = {"focus_scores": [], "blink_rate": 0}
-            vlog = []
-            fs   = []
-        db["exams"][eid]["result"] = {
-            "avg_focus":    sum(fs)/len(fs) if fs else 0,
-            "min_focus":    min(fs) if fs else 0,
-            "blink_rate":   d_f["blink_rate"],
-            "violations":   len(vlog),
-            "focus_scores": fs[-100:],
-            "answers":      dict(st.session_state.get(ans_key, {})),
-            "duration_s":   int(time.time() - exam_start),
-            "submitted_at": time.strftime("%H:%M:%S"),
-        }
-        db["exams"][eid]["status"] = "submitted"
-        save_db(db)
-        st.session_state.pop(ready_key, None)
-        st.session_state.pop(f"active_exam_{uname}", None)
-        st.rerun()
 
     # ── Fragment: timer + metrics, never touches webrtc ───────────────────────
     @st.fragment(run_every=2)
