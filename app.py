@@ -743,60 +743,60 @@ def student_page():
     if ctx.video_processor:
         ctx.video_processor.update_settings(settings)
 
-    if ctx.video_processor:
-        with ctx.video_processor._lock:
-            d    = ctx.video_processor.last.copy()
-            vlog = list(ctx.video_processor.violations_log)
+    @st.fragment(run_every=0.5)
+    def _metrics():
+        if ctx.video_processor:
+            with ctx.video_processor._lock:
+                d    = ctx.video_processor.last.copy()
+                vlog = list(ctx.video_processor.violations_log)
 
-        ph_focus.metric("🎯 Focus",      f"{int(d['focus_score'])}%")
-        ph_time.metric( "⏱ Session",    f"{int(d['session_time'])} s")
-        ph_blink.metric("👁 Blinks/min", f"{d['blink_rate']:.1f}")
-        ph_gaze.metric( "👀 Gaze",       d["gaze"])
-        ph_status.markdown(
-            f"<h3 style='color:{d['color']};margin:0'>{d['status']}</h3>",
-            unsafe_allow_html=True)
+            ph_focus.metric("🎯 Focus",      f"{int(d['focus_score'])}%")
+            ph_time.metric( "⏱ Session",    f"{int(d['session_time'])} s")
+            ph_blink.metric("👁 Blinks/min", f"{d['blink_rate']:.1f}")
+            ph_gaze.metric( "👀 Gaze",       d["gaze"])
+            ph_status.markdown(
+                f"<h3 style='color:{d['color']};margin:0'>{d['status']}</h3>",
+                unsafe_allow_html=True)
 
-        if vlog:
-            ph_viol.markdown("".join(f'<div class="vrow">{v}</div>' for v in vlog[:8]),
-                             unsafe_allow_html=True)
-        elif d["active_violations"]:
-            ph_viol.markdown("".join(f'<div class="vrow">{v}</div>' for v in d["active_violations"][:8]),
-                             unsafe_allow_html=True)
+            if vlog:
+                ph_viol.markdown("".join(f'<div class="vrow">{v}</div>' for v in vlog[:8]),
+                                 unsafe_allow_html=True)
+            elif d["active_violations"]:
+                ph_viol.markdown("".join(f'<div class="vrow">{v}</div>' for v in d["active_violations"][:8]),
+                                 unsafe_allow_html=True)
+            else:
+                ph_viol.success("No violations ✅")
+
+            fs = d["focus_scores"]
+            if len(fs) > 2:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    y=fs, mode="lines",
+                    line=dict(color="#00ff9d", width=2.5),
+                    fill="tozeroy", fillcolor="rgba(0,255,157,0.08)"))
+                fig.add_hline(y=78, line_color="rgba(0,255,157,0.3)", line_dash="dot")
+                fig.add_hline(y=55, line_color="rgba(255,204,0,0.3)",  line_dash="dot")
+                fig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=200, showlegend=False,
+                    margin=dict(l=0,r=0,t=8,b=0),
+                    yaxis=dict(range=[0,100], ticksuffix="%",
+                               gridcolor="rgba(255,255,255,0.05)",
+                               tickfont=dict(color="#aaa")),
+                    xaxis=dict(showgrid=False, showticklabels=False),
+                )
+                chart_ph.plotly_chart(fig, use_container_width=True,
+                                      key=f"sc_{int(time.time()*4)}")
         else:
-            ph_viol.success("No violations ✅")
+            ph_focus.metric("🎯 Focus",      "—")
+            ph_time.metric( "⏱ Session",    "—")
+            ph_blink.metric("👁 Blinks/min","—")
+            ph_gaze.metric( "👀 Gaze",      "—")
+            ph_status.markdown("<h3 style='color:#555;margin:0'>⏸ Start camera</h3>",
+                               unsafe_allow_html=True)
+            ph_viol.info("Allow camera access to begin")
 
-        fs = d["focus_scores"]
-        if len(fs) > 2:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                y=fs, mode="lines",
-                line=dict(color="#00ff9d", width=2.5),
-                fill="tozeroy", fillcolor="rgba(0,255,157,0.08)"))
-            fig.add_hline(y=78, line_color="rgba(0,255,157,0.3)", line_dash="dot")
-            fig.add_hline(y=55, line_color="rgba(255,204,0,0.3)",  line_dash="dot")
-            fig.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                height=200, showlegend=False,
-                margin=dict(l=0,r=0,t=8,b=0),
-                yaxis=dict(range=[0,100], ticksuffix="%",
-                           gridcolor="rgba(255,255,255,0.05)",
-                           tickfont=dict(color="#aaa")),
-                xaxis=dict(showgrid=False, showticklabels=False),
-            )
-            chart_ph.plotly_chart(fig, use_container_width=True,
-                                  key=f"sc_{int(time.time()*4)}")
-    else:
-        ph_focus.metric("🎯 Focus",      "—")
-        ph_time.metric( "⏱ Session",    "—")
-        ph_blink.metric("👁 Blinks/min","—")
-        ph_gaze.metric( "👀 Gaze",      "—")
-        ph_status.markdown("<h3 style='color:#555;margin:0'>⏸ Start camera</h3>",
-                           unsafe_allow_html=True)
-        ph_viol.info("Allow camera access to begin")
-
-    if ctx.state.playing:
-        time.sleep(0.2)
-        st.rerun()
+    _metrics()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
