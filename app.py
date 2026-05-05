@@ -381,28 +381,51 @@ class FocusProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DATABASE  (in-memory, survives rerenders via cache_resource)
+#  DATABASE  (JSON-file backed — persists across rerenders and reboots)
 # ══════════════════════════════════════════════════════════════════════════════
-import hashlib, uuid
+import hashlib, uuid, json
+from pathlib import Path
+
+DB_PATH = Path("/tmp/focus_guard_db.json")
 
 def _hash(pwd: str) -> str:
     return hashlib.sha256(pwd.encode()).hexdigest()
 
-@st.cache_resource
-def get_db():
-    """Shared in-memory DB. Returns dict with users and exams."""
+def _default_db() -> dict:
     return {
         "users": {
-            # username -> {name, password_hash, role}
             "admin":   {"name": "Administrator", "password": _hash("admin"),   "role": "admin"},
             "teacher": {"name": "Teacher",        "password": _hash("teacher"), "role": "teacher"},
             "student": {"name": "Student",        "password": _hash("student"), "role": "student"},
         },
-        "exams": {
-            # exam_id -> {title, teacher, student, created_at, status, result}
-            # status: pending | active | submitted
-        },
+        "exams": {},
     }
+
+def _load_db() -> dict:
+    try:
+        if DB_PATH.exists():
+            data = json.loads(DB_PATH.read_text())
+            # Merge: keep default users if db is empty
+            if not data.get("users"):
+                data["users"] = _default_db()["users"]
+            if "exams" not in data:
+                data["exams"] = {}
+            return data
+    except Exception:
+        pass
+    return _default_db()
+
+def save_db(db: dict):
+    """Call after every write operation."""
+    try:
+        DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+@st.cache_resource
+def get_db() -> dict:
+    """Load once, shared across all sessions. Backed by JSON file."""
+    return _load_db()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -499,6 +522,7 @@ def admin_page():
             if un != "admin":
                 if c4.button("🗑️", key=f"del_{un}"):
                     del db["users"][un]
+                    save_db(db)
                     st.rerun()
 
         st.divider()
@@ -516,6 +540,7 @@ def admin_page():
                     db["users"][new_user] = {
                         "name": new_name, "password": _hash(new_pass), "role": new_role
                     }
+                    save_db(db)
                     st.success(f"User **{new_user}** created")
                     st.rerun()
             else:
@@ -561,13 +586,26 @@ def teacher_page():
             st.warning("No students registered yet. Ask admin to add students.")
         else:
             st.subheader("Exam settings")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             title      = c1.text_input("Exam title", placeholder="e.g. Midterm — Math")
             duration   = c2.number_input("Duration (minutes)", min_value=5,
                                          max_value=180, value=30, step=5)
             student_un = st.selectbox("Assign to student",
                                       options=list(students.keys()),
                                       format_func=lambda u: f"{students[u]} ({u})")
+
+            # Deadline
+            dl_col1, dl_col2 = st.columns(2)
+            use_deadline = dl_col1.checkbox("📅 Set deadline")
+            deadline_str = None
+            if use_deadline:
+                import datetime
+                dl_date = dl_col1.date_input("Deadline date",
+                                             value=datetime.date.today() + datetime.timedelta(days=1))
+                dl_time = dl_col2.time_input("Deadline time",
+                                             value=datetime.time(23, 59))
+                deadline_str = f"{dl_date} {dl_time.strftime('%H:%M')}"
+
             enable_tg  = st.checkbox("📨 Send violations to Telegram", value=True)
 
             # ── Questions builder ──────────────────────────────────────────
@@ -575,7 +613,7 @@ def teacher_page():
             st.subheader("📝 Test questions")
             st.caption("Add multiple-choice questions for the student to answer during the exam.")
 
-            q_key = "draft_questions"
+            q_key = f"draft_questions_{uname}"
             if q_key not in st.session_state:
                 st.session_state[q_key] = []
 
@@ -630,11 +668,14 @@ def teacher_page():
                         "status":     "pending",
                         "telegram":   enable_tg,
                         "duration":   int(duration),
+                        "deadline":   deadline_str,
                         "questions":  list(st.session_state[q_key]),
                         "result":     None,
                     }
-                    st.session_state[q_key] = []  # clear draft
-                    st.success(f"✅ **{title}** created — {int(duration)} min — {n_q} questions")
+                    save_db(db)
+                    st.session_state[q_key] = []
+                    dl_info = f" · deadline {deadline_str}" if deadline_str else ""
+                    st.success(f"✅ **{title}** — {int(duration)} min — {n_q} questions{dl_info}")
                     st.rerun()
 
     # ── Results ───────────────────────────────────────────────────────────────
@@ -647,12 +688,13 @@ def teacher_page():
             for eid, ex in my_exams.items():
                 badge_cls = f"badge-{ex['status']}"
                 n_q = len(ex.get("questions", []))
+                dl  = f" · ⏰ Deadline: {ex['deadline']}" if ex.get("deadline") else ""
                 st.markdown(f"""<div class="exam-card">
                     <b>{ex['title']}</b> &nbsp;
                     <span class="{badge_cls}">{ex['status'].upper()}</span><br>
                     <small>Student: <b>{ex['student']}</b> ·
                     {ex.get('duration', '?')} min · {n_q} questions ·
-                    {ex['created_at']}</small>
+                    {ex['created_at']}{dl}</small>
                 </div>""", unsafe_allow_html=True)
 
                 if ex["status"] == "submitted" and ex.get("result"):
@@ -723,17 +765,56 @@ def student_page():
         if submitted:
             st.subheader("Completed exams")
             for eid, ex in submitted.items():
+                n_q = len(ex.get("questions", []))
+                r   = ex.get("result") or {}
+                score_str = ""
+                if r.get("answers") and ex.get("questions"):
+                    correct = sum(1 for i,q in enumerate(ex["questions"])
+                                  if r["answers"].get(str(i)) == q["answer"])
+                    score_str = f" · Test: {correct}/{n_q}"
                 st.markdown(f"""<div class="exam-card">
                     <b>{ex['title']}</b> &nbsp;
                     <span class="badge-submitted">SUBMITTED</span><br>
-                    <small>Teacher: {ex['teacher']} · {ex['created_at']}</small>
+                    <small>Teacher: {ex['teacher']} · {ex['created_at']}
+                    {score_str}</small>
                 </div>""", unsafe_allow_html=True)
         return
 
-    eid, exam = next(iter(my_exams.items()))
+    # ── Exam selection if multiple ─────────────────────────────────────────────
+    import datetime as dt
+
+    if len(my_exams) > 1:
+        st.subheader("You have multiple exams assigned. Select one to start:")
+        sel_key = f"selected_exam_{uname}"
+        options = {eid: ex["title"] for eid, ex in my_exams.items()}
+
+        # Check deadlines — mark expired
+        now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        for eid_opt, ex_opt in my_exams.items():
+            dl = ex_opt.get("deadline")
+            if dl and dl < now_str:
+                options[eid_opt] += " ⚠️ EXPIRED"
+
+        chosen_eid = st.radio("", list(options.keys()),
+                              format_func=lambda e: options[e],
+                              key=sel_key)
+        if st.button("Open this exam →", type="primary"):
+            st.session_state[f"active_exam_{uname}"] = chosen_eid
+            st.rerun()
+        return
+
+    eid  = st.session_state.get(f"active_exam_{uname}") or next(iter(my_exams))
+    exam = my_exams.get(eid) or next(iter(my_exams.values()))
+
+    # ── Check deadline ─────────────────────────────────────────────────────────
+    now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    if exam.get("deadline") and exam["deadline"] < now_str:
+        st.error(f"⏰ Deadline passed: **{exam['deadline']}**. This exam is no longer available.")
+        return
 
     if exam["status"] == "pending":
         db["exams"][eid]["status"] = "active"
+        save_db(db)
         st.rerun()
 
     # ── Onboarding screen ──────────────────────────────────────────────────────
@@ -746,9 +827,11 @@ def student_page():
             st.markdown(f"### 📋 {exam['title']}")
             st.caption(f"Teacher: {exam['teacher']}  ·  {exam['created_at']}")
             st.markdown("")
-            ic1, ic2 = st.columns(2)
+            ic1, ic2, ic3 = st.columns(3)
             ic1.metric("⏱ Duration",   f"{duration_min} min")
             ic2.metric("📝 Questions", str(n_questions))
+            dl = exam.get("deadline")
+            ic3.metric("📅 Deadline",  dl if dl else "None")
             st.divider()
 
             st.markdown("**Before you begin, confirm the following:**")
@@ -835,7 +918,10 @@ def student_page():
     if tab_test and questions:
         with tab_test:
             st.subheader("📝 Answer the questions")
-            st.caption("Select one answer per question. Save before submitting.")
+            if not ctx.state.playing:
+                st.warning("⚠️ Please start your camera first before answering questions.")
+                st.stop()
+            st.caption("Select one answer per question.")
 
             ans_key = f"answers_{eid}"
             if ans_key not in st.session_state:
@@ -878,6 +964,7 @@ def student_page():
             "submitted_at": time.strftime("%H:%M:%S"),
         }
         db["exams"][eid]["status"] = "submitted"
+        save_db(db)
         st.session_state.pop(ready_key, None)
         st.rerun()
 
@@ -901,7 +988,23 @@ def student_page():
             f"<div style='font-size:1.8rem;font-weight:700;color:{tcol}'>"
             f"{rm:02d}:{rs:02d}</div>", unsafe_allow_html=True)
 
-        # Auto-submit when time is up
+        # Also compute elapsed for metrics tab
+        h = elapsed // 3600
+        m = (elapsed % 3600) // 60
+        s = elapsed % 60
+
+        # Deadline check
+        dl = exam.get("deadline")
+        if dl:
+            import datetime as dt
+            if dt.datetime.now().strftime("%Y-%m-%d %H:%M") >= dl:
+                timer_ph.markdown(
+                    "<div style='font-size:1rem;color:#ff3b5c'>⏰ Deadline reached — auto-submitting</div>",
+                    unsafe_allow_html=True)
+                _do_submit()
+                return
+
+        # Auto-submit when countdown hits zero
         if remaining == 0:
             _do_submit()
             return
