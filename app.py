@@ -338,16 +338,12 @@ class FocusProcessor(VideoProcessorBase):
             # Telegram
             if settings.get("enable_telegram", True) and self.notifier.ok():
                 caption = (
-                    f"🚨 Violation Detected
-"
-                    f"👤 Student: {settings.get('student_name', 'Unknown')}
-"
-                    f"⏰ Time: {ts}
-"
-                    f"📋 Type: {vtext}
-"
-                    f"📉 Focus: {int(score)}%"
-                )
+    f"🚨 Violation Detected\n"
+    f"👤 Student: {settings.get('student_name', 'Unknown')}\n"
+    f"⏰ Time: {ts}\n"
+    f"📋 Type: {vtext}\n"
+    f"📉 Focus: {int(score)}%"
+)
                 self.notifier.send(ann, caption)
 
         if person_absent:   status, color = "🔴 No person",  "#ff4444"
