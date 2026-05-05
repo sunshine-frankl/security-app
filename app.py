@@ -720,23 +720,31 @@ def teacher_page():
                         m5.metric("Test score", f"{correct}/{len(ex['questions'])}")
 
                     # Show answers
-                    if ex.get("questions") and r.get("answers"):
-                        with st.expander("📝 View answers"):
-                            for i, q in enumerate(ex["questions"]):
-                                ans_given   = r["answers"].get(str(i))
+                    if ex.get("questions"):
+                        qs = ex["questions"]
+                        answers = r.get("answers", {})
+                        correct_count = sum(
+                            1 for i,q in enumerate(qs)
+                            if answers.get(str(i)) == q["answer"]
+                        )
+                        st.markdown(f"**📝 Test score: {correct_count}/{len(qs)}**")
+                        with st.expander("View detailed answers"):
+                            for i, q in enumerate(qs):
+                                ans_given   = answers.get(str(i))
                                 ans_correct = q["answer"]
-                                ok = ans_given == ans_correct
-                                icon = "✅" if ok else "❌"
+                                ok   = (ans_given == ans_correct)
+                                icon = "✅" if ok else ("❌" if ans_given is not None else "⬜")
                                 st.markdown(f"**{icon} Q{i+1}. {q['text']}**")
                                 for j, opt in enumerate(q["options"]):
                                     if j == ans_correct and j == ans_given:
-                                        st.markdown(f"&nbsp;&nbsp;✅ **{opt}** ← correct, chosen")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;✅ **{opt}** ← correct, chosen")
                                     elif j == ans_correct:
-                                        st.markdown(f"&nbsp;&nbsp;✅ **{opt}** ← correct")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;✅ **{opt}** ← correct answer")
                                     elif j == ans_given:
-                                        st.markdown(f"&nbsp;&nbsp;❌ ~~{opt}~~ ← chosen")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;❌ ~~{opt}~~ ← student chose")
                                     else:
-                                        st.markdown(f"&nbsp;&nbsp;{chr(65+j)}. {opt}")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;{chr(65+j)}. {opt}")
+                                st.markdown("")
                     st.divider()
 
                 elif ex["status"] == "pending":
@@ -927,26 +935,29 @@ def student_page():
     # ── Test tab ───────────────────────────────────────────────────────────────
     if tab_test and questions:
         with tab_test:
-            st.subheader("📝 Answer the questions")
-            if not ctx.state.playing:
-                st.warning("⚠️ Please start your camera first before answering questions.")
-                st.stop()
-            st.caption("Select one answer per question.")
-
             ans_key = f"answers_{eid}"
             if ans_key not in st.session_state:
                 st.session_state[ans_key] = {}
 
-            for i, q in enumerate(questions):
-                st.markdown(f"**Q{i+1}. {q['text']}**")
-                opts  = [f"{chr(65+j)}. {opt}" for j, opt in enumerate(q["options"])]
-                saved = st.session_state[ans_key].get(str(i))
-                idx   = saved if saved is not None else 0
-                choice = st.radio("", opts, index=idx,
-                                  key=f"q_{eid}_{i}", horizontal=True,
-                                  label_visibility="collapsed")
-                st.session_state[ans_key][str(i)] = opts.index(choice)
-                st.markdown("")
+            if not ctx.state.playing:
+                st.warning("⚠️ Start your camera first (Camera tab → START)")
+            else:
+                st.subheader("📝 Answer the questions")
+                st.caption(f"{len(questions)} questions · answers save automatically")
+                st.divider()
+
+                for i, q in enumerate(questions):
+                    st.markdown(f"**Q{i+1}. {q['text']}**")
+                    opts   = [f"{chr(65+j)}. {opt}" for j, opt in enumerate(q["options"])]
+                    saved  = st.session_state[ans_key].get(str(i), 0)
+                    choice = st.radio("", opts, index=saved,
+                                      key=f"q_{eid}_{i}", horizontal=True,
+                                      label_visibility="collapsed")
+                    st.session_state[ans_key][str(i)] = opts.index(choice)
+                    st.divider()
+
+                answered = len(st.session_state[ans_key])
+                st.caption(f"Answered: {answered}/{len(questions)}")
 
     with tab_metrics:
         metrics_ph = st.empty()
