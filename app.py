@@ -697,106 +697,112 @@ def student_page():
             async_processing=True,
         )
         st.divider()
-        chart_ph = st.empty()
+        chart_container = st.container()
 
     with col_side:
-        st.subheader("📊 Metrics")
-        c1, c2 = st.columns(2)
-        ph_focus = c1.empty()
-        ph_time  = c2.empty()
-        c3, c4 = st.columns(2)
-        ph_blink = c3.empty()
-        ph_gaze  = c4.empty()
-        st.divider()
-        ph_status = st.empty()
-        st.divider()
-        st.subheader("🚨 Violations")
-        ph_viol = st.empty()
+        metrics_container = st.container()
 
-        st.divider()
-        st.warning("⚠️ Do not close this tab until you submit!")
-        if st.button("✅ Submit exam", type="primary", use_container_width=True):
-            # Сохраняем результат
-            if ctx.video_processor:
-                with ctx.video_processor._lock:
-                    d_final = ctx.video_processor.last.copy()
-                    vlog    = list(ctx.video_processor.violations_log)
-                fs = d_final["focus_scores"]
-                db["exams"][eid]["result"] = {
-                    "avg_focus":   sum(fs)/len(fs) if fs else 0,
-                    "min_focus":   min(fs) if fs else 0,
-                    "blink_rate":  d_final["blink_rate"],
-                    "violations":  len(vlog),
-                    "focus_scores": fs[-100:],
-                    "submitted_at": time.strftime("%H:%M:%S"),
-                }
-            else:
-                db["exams"][eid]["result"] = {
-                    "avg_focus": 0, "min_focus": 0,
-                    "blink_rate": 0, "violations": 0,
-                    "focus_scores": [], "submitted_at": time.strftime("%H:%M:%S"),
-                }
-            db["exams"][eid]["status"] = "submitted"
-            st.success("✅ Exam submitted successfully!")
-            st.rerun()
-
+    # Pass settings to processor
     if ctx.video_processor:
         ctx.video_processor.update_settings(settings)
 
-    @st.fragment(run_every=0.5)
-    def _metrics():
-        if ctx.video_processor:
-            with ctx.video_processor._lock:
-                d    = ctx.video_processor.last.copy()
-                vlog = list(ctx.video_processor.violations_log)
+    # ── Self-contained fragment — only this reruns every second ───────────────
+    @st.fragment(run_every=1)
+    def _live_panel():
+        # Submit button inside fragment so it doesn't trigger full rerun
+        with metrics_container:
+            st.subheader("📊 Metrics")
+            if ctx.video_processor:
+                with ctx.video_processor._lock:
+                    d    = ctx.video_processor.last.copy()
+                    vlog = list(ctx.video_processor.violations_log)
 
-            ph_focus.metric("🎯 Focus",      f"{int(d['focus_score'])}%")
-            ph_time.metric( "⏱ Session",    f"{int(d['session_time'])} s")
-            ph_blink.metric("👁 Blinks/min", f"{d['blink_rate']:.1f}")
-            ph_gaze.metric( "👀 Gaze",       d["gaze"])
-            ph_status.markdown(
-                f"<h3 style='color:{d['color']};margin:0'>{d['status']}</h3>",
-                unsafe_allow_html=True)
+                c1, c2 = st.columns(2)
+                c1.metric("🎯 Focus",      f"{int(d['focus_score'])}%")
+                c2.metric("⏱ Session",    f"{int(d['session_time'])} s")
+                c3, c4 = st.columns(2)
+                c3.metric("👁 Blinks/min", f"{d['blink_rate']:.1f}")
+                c4.metric("👀 Gaze",       d["gaze"])
 
-            if vlog:
-                ph_viol.markdown("".join(f'<div class="vrow">{v}</div>' for v in vlog[:8]),
-                                 unsafe_allow_html=True)
-            elif d["active_violations"]:
-                ph_viol.markdown("".join(f'<div class="vrow">{v}</div>' for v in d["active_violations"][:8]),
-                                 unsafe_allow_html=True)
+                st.divider()
+                st.markdown(
+                    f"<h3 style='color:{d['color']};margin:0'>{d['status']}</h3>",
+                    unsafe_allow_html=True)
+
+                st.divider()
+                st.subheader("🚨 Violations")
+                if vlog:
+                    st.markdown("".join(f'<div class="vrow">{v}</div>' for v in vlog[:8]),
+                                unsafe_allow_html=True)
+                elif d["active_violations"]:
+                    st.markdown("".join(f'<div class="vrow">{v}</div>' for v in d["active_violations"][:8]),
+                                unsafe_allow_html=True)
+                else:
+                    st.success("No violations ✅")
+
+                # Chart
+                fs = d["focus_scores"]
+                if len(fs) > 2:
+                    with chart_container:
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            y=fs, mode="lines",
+                            line=dict(color="#00ff9d", width=2.5),
+                            fill="tozeroy", fillcolor="rgba(0,255,157,0.08)"))
+                        fig.add_hline(y=78, line_color="rgba(0,255,157,0.3)", line_dash="dot")
+                        fig.add_hline(y=55, line_color="rgba(255,204,0,0.3)",  line_dash="dot")
+                        fig.update_layout(
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            height=200, showlegend=False,
+                            margin=dict(l=0,r=0,t=8,b=0),
+                            yaxis=dict(range=[0,100], ticksuffix="%",
+                                       gridcolor="rgba(255,255,255,0.05)",
+                                       tickfont=dict(color="#aaa")),
+                            xaxis=dict(showgrid=False, showticklabels=False),
+                        )
+                        st.plotly_chart(fig, use_container_width=True,
+                                        key=f"sc_{int(time.time())}")
             else:
-                ph_viol.success("No violations ✅")
+                c1, c2 = st.columns(2)
+                c1.metric("🎯 Focus",      "—")
+                c2.metric("⏱ Session",    "—")
+                c3, c4 = st.columns(2)
+                c3.metric("👁 Blinks/min","—")
+                c4.metric("👀 Gaze",      "—")
+                st.divider()
+                st.markdown("<h3 style='color:#555;margin:0'>⏸ Start camera</h3>",
+                            unsafe_allow_html=True)
+                st.divider()
+                st.subheader("🚨 Violations")
+                st.info("Allow camera access to begin")
 
-            fs = d["focus_scores"]
-            if len(fs) > 2:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    y=fs, mode="lines",
-                    line=dict(color="#00ff9d", width=2.5),
-                    fill="tozeroy", fillcolor="rgba(0,255,157,0.08)"))
-                fig.add_hline(y=78, line_color="rgba(0,255,157,0.3)", line_dash="dot")
-                fig.add_hline(y=55, line_color="rgba(255,204,0,0.3)",  line_dash="dot")
-                fig.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=200, showlegend=False,
-                    margin=dict(l=0,r=0,t=8,b=0),
-                    yaxis=dict(range=[0,100], ticksuffix="%",
-                               gridcolor="rgba(255,255,255,0.05)",
-                               tickfont=dict(color="#aaa")),
-                    xaxis=dict(showgrid=False, showticklabels=False),
-                )
-                chart_ph.plotly_chart(fig, use_container_width=True,
-                                      key=f"sc_{int(time.time()*4)}")
-        else:
-            ph_focus.metric("🎯 Focus",      "—")
-            ph_time.metric( "⏱ Session",    "—")
-            ph_blink.metric("👁 Blinks/min","—")
-            ph_gaze.metric( "👀 Gaze",      "—")
-            ph_status.markdown("<h3 style='color:#555;margin:0'>⏸ Start camera</h3>",
-                               unsafe_allow_html=True)
-            ph_viol.info("Allow camera access to begin")
+            st.divider()
+            st.warning("⚠️ Do not close this tab until you submit!")
+            if st.button("✅ Submit exam", type="primary", use_container_width=True):
+                if ctx.video_processor:
+                    with ctx.video_processor._lock:
+                        d_final = ctx.video_processor.last.copy()
+                        vlog_f  = list(ctx.video_processor.violations_log)
+                    fs = d_final["focus_scores"]
+                    db["exams"][eid]["result"] = {
+                        "avg_focus":    sum(fs)/len(fs) if fs else 0,
+                        "min_focus":    min(fs) if fs else 0,
+                        "blink_rate":   d_final["blink_rate"],
+                        "violations":   len(vlog_f),
+                        "focus_scores": fs[-100:],
+                        "submitted_at": time.strftime("%H:%M:%S"),
+                    }
+                else:
+                    db["exams"][eid]["result"] = {
+                        "avg_focus": 0, "min_focus": 0,
+                        "blink_rate": 0, "violations": 0,
+                        "focus_scores": [], "submitted_at": time.strftime("%H:%M:%S"),
+                    }
+                db["exams"][eid]["status"] = "submitted"
+                st.success("✅ Exam submitted successfully!")
+                st.rerun()
 
-    _metrics()
+    _live_panel()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
