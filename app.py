@@ -338,7 +338,6 @@ class FocusProcessor(VideoProcessorBase):
             # Telegram
             if settings.get("enable_telegram", True) and self.notifier.ok():
                 caption = (
-                    f"🚨 Violation Detected
 "
                     f"👤 Student: {settings.get('student_name', 'Unknown')}
 "
