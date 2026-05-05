@@ -17,8 +17,15 @@ from streamlit_webrtc import (
     RTCConfiguration, VideoProcessorBase, WebRtcMode, webrtc_streamer,
 )
 
-TELEGRAM_BOT_TOKEN = "8702324957:AAE45czlrbs5nt9q7uxxwgukArUpNjoZ-j0"
-TELEGRAM_CHAT_ID   = "-1003964944926"
+# Tokens — read from secrets if available, otherwise use hardcoded value
+def _get_secret(key, default=""):
+    try:
+        return st.secrets.get(key, default) or default
+    except Exception:
+        return os.getenv(key, default)
+
+TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN", "8702324957:AAE45czlrbs5nt9q7uxxwgukArUpNjoZ-j0")
+TELEGRAM_CHAT_ID   = _get_secret("TELEGRAM_CHAT_ID",   "-1003964944926")
 def _get_rtc_config():
     """Build RTC config using Metered TURN credentials from secrets."""
     try:
@@ -59,9 +66,9 @@ YOLO_EVERY_N_FRAMES = 15   # less frequent = less CPU
 YOLO_IMG_SIZE       = 224   # smaller = faster
 YOLO_CONF           = 0.50
 SUSPICIOUS_OBJECTS  = {"cell phone", "book", "remote", "laptop", "tv"}
-VIOLATION_COOLDOWN  = 15.0
-GAZE_GRACE_SEC      = 2.5
-ABSENCE_GRACE_SEC   = 3.0
+VIOLATION_COOLDOWN  = 8.0
+GAZE_GRACE_SEC      = 1.5
+ABSENCE_GRACE_SEC   = 2.0
 
 # ── MediaPipe landmark indices ─────────────────────────────────────────────────
 # EAR — 6 points per eye (P1..P6 in the standard formula)
@@ -143,7 +150,8 @@ def get_notifier():
             self.last_error = None
             threading.Thread(target=self._loop, daemon=True).start()
         def ok(self):
-            return bool(TELEGRAM_BOT_TOKEN) and TELEGRAM_BOT_TOKEN != "YOUR_BOT_TOKEN_HERE" and _req is not None
+            tok = TELEGRAM_BOT_TOKEN
+            return bool(tok) and tok not in ("YOUR_BOT_TOKEN_HERE", "") and _req is not None
         def send(self, img, cap):
             if not self.ok(): return
             try: self._q.put_nowait((img.copy(), cap))
@@ -156,13 +164,23 @@ def get_notifier():
                     if not ok: continue
                     r = _req.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                        data={"chat_id": TELEGRAM_CHAT_ID, "caption": cap, "parse_mode": "Markdown"},
+                        data={"chat_id": TELEGRAM_CHAT_ID, "caption": cap},
                         files={"photo": ("v.jpg", io.BytesIO(buf.tobytes()), "image/jpeg")},
                         timeout=15)
                     if r.status_code == 200: self.total_sent += 1
                     else: self.last_error = f"HTTP {r.status_code}"
-                except Exception as e: self.last_error = str(e)
-                finally: self._q.task_done()
+                except Exception as e:
+                    self.last_error = f"Photo send failed: {e}"
+                    # Try text-only as fallback
+                    try:
+                        _req.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            data={"chat_id": TELEGRAM_CHAT_ID, "text": cap},
+                            timeout=10)
+                    except Exception:
+                        pass
+                finally:
+                    self._q.task_done()
     return _N()
 
 
@@ -170,7 +188,12 @@ def get_notifier():
 class FocusProcessor(VideoProcessorBase):
     def __init__(self):
         self._lock       = threading.Lock()
-        self.settings    = {}
+        self.settings    = {
+            "track_absence": True, "track_gaze": True, "track_extra": True,
+            "track_phone":   True, "track_book":  True, "track_objects": True,
+            "enable_yolo":   True, "enable_telegram": True,
+            "student_name":  "Student",
+        }
         self.face_mesh   = make_face_mesh()
         self.yolo        = load_yolo()
         self.notifier    = get_notifier()
@@ -203,8 +226,10 @@ class FocusProcessor(VideoProcessorBase):
                 continue
             try:
                 self._run_analysis(img)
-            except Exception:
-                pass
+            except Exception as e:
+                # Store error so we can debug
+                with self._lock:
+                    self.last["_last_error"] = str(e)
 
     def _run_analysis(self, img):
         h, w = img.shape[:2]
@@ -288,7 +313,7 @@ class FocusProcessor(VideoProcessorBase):
         active = []
         if settings.get("track_absence") and person_absent:
             active.append(("person_absent", "🚫 Person absent"))
-        if settings.get("track_gaze") and not person_absent and gaze_cv not in ("Center",):
+        if settings.get("track_gaze") and not person_absent and gaze_cv not in ("Center", ""):
             active.append(("gaze_away", gaze_ui))
         if settings.get("track_extra") and faces_count > 1:
             active.append(("extra_face", f"👥 {faces_count} faces"))
@@ -301,14 +326,29 @@ class FocusProcessor(VideoProcessorBase):
             elif settings.get("track_objects") and cls in ("laptop","tv"):
                 active.append((cls, f"💻 {cls.capitalize()} ({obj['conf']:.2f})"))
 
+        # ── Violation logging + Telegram ──────────────────────────────────────
         ann = img.copy()
-        for _, vtext in self._vio_check(active):
+        confirmed = self._vio_check(active)
+
+        for _, vtext in confirmed:
             ts = time.strftime("%H:%M:%S")
-            self.violations_log.appendleft(f"[{ts}] {vtext}")
-            if settings.get("enable_telegram"):
-                self.notifier.send(ann,
-                    f"🚨 *Violation*\n👤 {settings.get('student_name','?')}\n"
-                    f"⏰ {ts}\n📋 {vtext}\n📉 Focus: {int(score)}%")
+            log_entry = f"[{ts}] {vtext}"
+            self.violations_log.appendleft(log_entry)
+
+            # Telegram
+            if settings.get("enable_telegram", True) and self.notifier.ok():
+                caption = (
+                    f"🚨 Violation Detected
+"
+                    f"👤 Student: {settings.get('student_name', 'Unknown')}
+"
+                    f"⏰ Time: {ts}
+"
+                    f"📋 Type: {vtext}
+"
+                    f"📉 Focus: {int(score)}%"
+                )
+                self.notifier.send(ann, caption)
 
         if person_absent:   status, color = "🔴 No person",  "#ff4444"
         elif active:        status, color = "🔴 Violation",  "#ff4444"
@@ -330,19 +370,45 @@ class FocusProcessor(VideoProcessorBase):
         with self._lock: self.settings = s.copy()
 
     def _vio_check(self, active):
+        """
+        Returns violations ready to LOG and SEND to Telegram.
+        - First seen: start grace period timer
+        - After grace period: add to log (once per VIOLATION_COOLDOWN)
+        - Telegram: same cooldown
+        """
         now = time.time()
         active_types = {v[0] for v in active}
+
+        # Clear timers for violations no longer active
         for t in list(self._vio_first):
-            if t not in active_types: del self._vio_first[t]
-        grace = {"person_absent": ABSENCE_GRACE_SEC, "gaze_away": GAZE_GRACE_SEC, "extra_face": 1.0}
-        out = []
+            if t not in active_types:
+                del self._vio_first[t]
+
+        confirmed = []
         for vtype, vtext in active:
-            if vtype not in self._vio_first: self._vio_first[vtype] = now; continue
-            if now - self._vio_first[vtype] < grace.get(vtype, 0.6): continue
-            if now - self._vio_sent.get(vtype, 0) < VIOLATION_COOLDOWN: continue
+            # Start timer on first occurrence
+            if vtype not in self._vio_first:
+                self._vio_first[vtype] = now
+                continue
+
+            grace = {
+                "person_absent": ABSENCE_GRACE_SEC,
+                "gaze_away":     GAZE_GRACE_SEC,
+                "extra_face":    1.0,
+            }.get(vtype, 0.5)
+
+            # Not enough time passed yet
+            if now - self._vio_first[vtype] < grace:
+                continue
+
+            # Already logged recently (cooldown)
+            if now - self._vio_sent.get(vtype, 0) < VIOLATION_COOLDOWN:
+                continue
+
             self._vio_sent[vtype] = now
-            out.append((vtype, vtext))
-        return out
+            confirmed.append((vtype, vtext))
+
+        return confirmed
 
     def recv(self, frame):
         """Non-blocking recv — push frame to worker, draw last known overlay."""
@@ -1052,18 +1118,24 @@ def student_page():
             d    = ctx.video_processor.last.copy()
             vlog = list(ctx.video_processor.violations_log)
 
-        # Side panel
+        # Side panel — status
         status_ph.markdown(
             f"<div style='color:{d['color']};font-weight:600'>{d['status']}</div>",
             unsafe_allow_html=True)
 
-        if vlog:
+        # Violations panel:
+        # - active_violations = happening RIGHT NOW (show immediately)
+        # - vlog = confirmed + logged (shown in metrics tab)
+        if d["active_violations"]:
+            html = "".join(
+                f'<div class="vrow">⚠️ {v}</div>'
+                for v in d["active_violations"][:4]
+            )
+            viol_ph.markdown(html, unsafe_allow_html=True)
+        elif vlog:
+            # Show last confirmed violation
             viol_ph.markdown(
-                "".join(f'<div class="vrow">{v}</div>' for v in vlog[:4]),
-                unsafe_allow_html=True)
-        elif d["active_violations"]:
-            viol_ph.markdown(
-                "".join(f'<div class="vrow">{v}</div>' for v in d["active_violations"][:4]),
+                f'<div class="vrow">{vlog[0]}</div>',
                 unsafe_allow_html=True)
         else:
             viol_ph.success("Clean ✅")
@@ -1076,11 +1148,20 @@ def student_page():
             c3.metric("👁 Blinks/min", f"{d['blink_rate']:.1f}")
             c4.metric("👀 Gaze",       d["gaze"])
             st.divider()
+            # Current active violations
+            if d["active_violations"]:
+                st.markdown("**⚠️ Active now:**")
+                st.markdown(
+                    "".join(f'<div class="vrow">⚠️ {v}</div>' for v in d["active_violations"]),
+                    unsafe_allow_html=True)
+
+            # Confirmed violation log
             if vlog:
-                st.markdown("**Violation log**")
-                st.markdown("".join(f'<div class="vrow">{v}</div>' for v in vlog),
-                            unsafe_allow_html=True)
-            else:
+                st.markdown("**📋 Violation log:**")
+                st.markdown(
+                    "".join(f'<div class="vrow">{v}</div>' for v in vlog),
+                    unsafe_allow_html=True)
+            elif not d["active_violations"]:
                 st.success("No violations detected ✅")
 
     _tick()
