@@ -647,32 +647,60 @@ def student_page():
     st.title("🎓 Student Panel")
     st.divider()
 
+    # ── No exam assigned ───────────────────────────────────────────────────────
     if not my_exams:
-        st.info("📭 No active exams assigned to you. Wait for your teacher to create one.")
+        st.info("📭 No active exams assigned to you.")
         submitted = {eid: ex for eid, ex in db["exams"].items()
                      if ex["student"] == uname and ex["status"] == "submitted"}
         if submitted:
-            st.subheader("✅ Completed exams")
+            st.subheader("Completed exams")
             for eid, ex in submitted.items():
                 st.markdown(f"""<div class="exam-card">
                     <b>{ex['title']}</b> &nbsp;
                     <span class="badge-submitted">SUBMITTED</span><br>
-                    <small>Teacher: {ex['teacher']} &nbsp;·&nbsp; {ex['created_at']}</small>
+                    <small>Teacher: {ex['teacher']} · {ex['created_at']}</small>
                 </div>""", unsafe_allow_html=True)
         return
 
     eid, exam = next(iter(my_exams.items()))
 
-    # Exam info
-    c1, c2, c3 = st.columns(3)
-    c1.metric("📋 Exam",    exam["title"])
-    c2.metric("👨‍🏫 Teacher", exam["teacher"])
-    c3.metric("🕐 Created", exam["created_at"])
-    st.divider()
-
     if exam["status"] == "pending":
         db["exams"][eid]["status"] = "active"
         st.rerun()
+
+    # ── Onboarding screen ──────────────────────────────────────────────────────
+    ready_key = f"ready_{eid}"
+    if not st.session_state.get(ready_key):
+        _, col, _ = st.columns([1, 2, 1])
+        with col:
+            st.markdown(f"### 📋 {exam['title']}")
+            st.caption(f"Teacher: {exam['teacher']}  ·  Assigned: {exam['created_at']}")
+            st.divider()
+
+            st.markdown("**Before you begin, confirm the following:**")
+            c1 = st.checkbox("My camera is working")
+            c2 = st.checkbox("I am alone in the room")
+            c3 = st.checkbox("My face is clearly visible")
+            c4 = st.checkbox("I understand that my session is being monitored")
+
+            st.divider()
+            st.caption("Once you start, your session will be recorded. Do not close this tab.")
+
+            all_checked = c1 and c2 and c3 and c4
+            if st.button("▶ Start exam",
+                         type="primary",
+                         use_container_width=True,
+                         disabled=not all_checked):
+                st.session_state[ready_key]          = True
+                st.session_state[f"start_{eid}"]     = time.time()
+                st.rerun()
+
+            if not all_checked:
+                st.caption("✦ Check all boxes to continue")
+        return
+
+    # ── Exam start time ────────────────────────────────────────────────────────
+    exam_start = st.session_state.get(f"start_{eid}", time.time())
 
     settings = dict(
         student_name=display,
@@ -682,107 +710,129 @@ def student_page():
         track_phone=True,   track_book=True, track_objects=True,
     )
 
-    # ── Tabs ──────────────────────────────────────────────────────────────────
+    # ── Tabs ───────────────────────────────────────────────────────────────────
     tab_cam, tab_metrics = st.tabs(["🎥 Camera", "📊 Metrics"])
 
     with tab_cam:
-        col_vid, col_side = st.columns([2.2, 1])
+        col_vid, col_info = st.columns([2.4, 1])
 
         with col_vid:
+            # Video — key is stable, never changes during exam
             ctx = webrtc_streamer(
-                key=f"student_{eid}",
+                key=f"exam_{eid}",
                 mode=WebRtcMode.SENDRECV,
                 rtc_configuration=_get_rtc_config(),
-                media_stream_constraints={"video": True, "audio": False},
+                media_stream_constraints={
+                    "video": {"width": {"ideal": 640},
+                              "height": {"ideal": 480},
+                              "frameRate": {"ideal": 15}},
+                    "audio": False,
+                },
                 video_processor_factory=FocusProcessor,
                 async_processing=True,
             )
 
-            st.divider()
-            st.warning("⚠️ Do not close this tab until you submit!")
-            if st.button("✅ Submit exam", type="primary", use_container_width=True):
-                if ctx.video_processor:
-                    with ctx.video_processor._lock:
-                        d_final = ctx.video_processor.last.copy()
-                        vlog_f  = list(ctx.video_processor.violations_log)
-                    fs = d_final["focus_scores"]
-                    db["exams"][eid]["result"] = {
-                        "avg_focus":    sum(fs)/len(fs) if fs else 0,
-                        "min_focus":    min(fs) if fs else 0,
-                        "blink_rate":   d_final["blink_rate"],
-                        "violations":   len(vlog_f),
-                        "focus_scores": fs[-100:],
-                        "submitted_at": time.strftime("%H:%M:%S"),
-                    }
-                else:
-                    db["exams"][eid]["result"] = {
-                        "avg_focus": 0, "min_focus": 0,
-                        "blink_rate": 0, "violations": 0,
-                        "focus_scores": [], "submitted_at": time.strftime("%H:%M:%S"),
-                    }
-                db["exams"][eid]["status"] = "submitted"
-                st.success("✅ Exam submitted successfully!")
-                st.rerun()
+        with col_info:
+            # Timer — updates via fragment without touching webrtc
+            st.markdown("#### ⏱ Timer")
+            timer_ph = st.empty()
 
-        with col_side:
-            st.subheader("🔴 Live status")
+            st.markdown("---")
+            st.markdown("#### Status")
             status_ph = st.empty()
-            viol_ph   = st.empty()
 
-    # ── Metrics tab — self-contained fragment ──────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### Violations")
+            viol_ph = st.empty()
+
+        # Submit — outside webrtc column, stable position
+        st.divider()
+        st.caption("⚠️ Do not close or refresh this tab until you submit.")
+        if st.button("✅ Submit exam", type="primary", use_container_width=True):
+            if ctx.video_processor:
+                with ctx.video_processor._lock:
+                    d_f  = ctx.video_processor.last.copy()
+                    vlog = list(ctx.video_processor.violations_log)
+                fs = d_f["focus_scores"]
+                db["exams"][eid]["result"] = {
+                    "avg_focus":    sum(fs)/len(fs) if fs else 0,
+                    "min_focus":    min(fs) if fs else 0,
+                    "blink_rate":   d_f["blink_rate"],
+                    "violations":   len(vlog),
+                    "focus_scores": fs[-100:],
+                    "duration_s":   int(time.time() - exam_start),
+                    "submitted_at": time.strftime("%H:%M:%S"),
+                }
+            else:
+                db["exams"][eid]["result"] = {
+                    "avg_focus": 0, "min_focus": 0, "blink_rate": 0,
+                    "violations": 0, "focus_scores": [],
+                    "duration_s": 0, "submitted_at": time.strftime("%H:%M:%S"),
+                }
+            db["exams"][eid]["status"] = "submitted"
+            st.session_state.pop(ready_key, None)
+            st.success("✅ Submitted!")
+            st.rerun()
+
     with tab_metrics:
         metrics_ph = st.empty()
 
+    # ── Pass settings to processor ─────────────────────────────────────────────
     if ctx.video_processor:
         ctx.video_processor.update_settings(settings)
 
-    # Fragment updates both status sidebar and metrics tab
-    @st.fragment(run_every=1)
-    def _updater():
+    # ── Fragment: ONLY updates timer + metrics, never touches webrtc ───────────
+    # run_every=2 is safe because fragment doesn't rerender the camera tab
+    @st.fragment(run_every=2)
+    def _tick():
+        elapsed = int(time.time() - exam_start)
+        h, m, s = elapsed//3600, (elapsed%3600)//60, elapsed%60
+        timer_ph.markdown(
+            f"<div style='font-size:1.6rem;font-weight:700;color:#00e5ff'>"
+            f"{h:02d}:{m:02d}:{s:02d}</div>", unsafe_allow_html=True)
+
         if not ctx.video_processor:
-            status_ph.info("⏸ Start the camera first")
-            metrics_ph.info("⏸ Start the camera to see metrics")
+            status_ph.caption("Start camera")
+            viol_ph.caption("—")
+            metrics_ph.info("Start the camera to see metrics")
             return
 
         with ctx.video_processor._lock:
             d    = ctx.video_processor.last.copy()
             vlog = list(ctx.video_processor.violations_log)
 
-        # Live status (right of video)
+        # Side panel
         status_ph.markdown(
-            f"<h3 style='color:{d['color']};margin:0'>{d['status']}</h3>",
+            f"<div style='color:{d['color']};font-weight:600'>{d['status']}</div>",
             unsafe_allow_html=True)
 
         if vlog:
             viol_ph.markdown(
-                "".join(f'<div class="vrow">{v}</div>' for v in vlog[:5]),
+                "".join(f'<div class="vrow">{v}</div>' for v in vlog[:4]),
                 unsafe_allow_html=True)
         elif d["active_violations"]:
             viol_ph.markdown(
-                "".join(f'<div class="vrow">{v}</div>' for v in d["active_violations"][:5]),
+                "".join(f'<div class="vrow">{v}</div>' for v in d["active_violations"][:4]),
                 unsafe_allow_html=True)
         else:
-            viol_ph.success("No violations ✅")
+            viol_ph.success("Clean ✅")
 
-        # Full metrics in tab
+        # Metrics tab
         with metrics_ph.container():
-            st.subheader("📊 Live Metrics")
-            c1, c2 = st.columns(2)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("🎯 Focus",      f"{int(d['focus_score'])}%")
-            c2.metric("⏱ Session",    f"{int(d['session_time'])} s")
-            c3, c4 = st.columns(2)
+            c2.metric("⏱ Session",    f"{h:02d}:{m:02d}:{s:02d}")
             c3.metric("👁 Blinks/min", f"{d['blink_rate']:.1f}")
             c4.metric("👀 Gaze",       d["gaze"])
             st.divider()
-            st.subheader("🚨 Violations log")
             if vlog:
-                st.markdown(
-                    "".join(f'<div class="vrow">{v}</div>' for v in vlog[:10]),
-                    unsafe_allow_html=True)
+                st.markdown("**Violation log**")
+                st.markdown("".join(f'<div class="vrow">{v}</div>' for v in vlog),
+                            unsafe_allow_html=True)
             else:
                 st.success("No violations detected ✅")
 
-    _updater()
+    _tick()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
