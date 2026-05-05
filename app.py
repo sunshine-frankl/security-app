@@ -951,7 +951,11 @@ def student_page():
     with tab_metrics:
         metrics_ph = st.empty()
 
-    # ── Submit helper ──────────────────────────────────────────────────────────
+    # ── Pass settings to processor ─────────────────────────────────────────────
+    if ctx.video_processor:
+        ctx.video_processor.update_settings(settings)
+
+    # ── Submit helper (defined after ctx is available) ─────────────────────────
     def _do_submit():
         ans_key = f"answers_{eid}"
         if ctx.video_processor:
@@ -960,7 +964,7 @@ def student_page():
                 vlog = list(ctx.video_processor.violations_log)
             fs = d_f["focus_scores"]
         else:
-            d_f  = {"focus_scores":[], "blink_rate":0}
+            d_f  = {"focus_scores": [], "blink_rate": 0}
             vlog = []
             fs   = []
         db["exams"][eid]["result"] = {
@@ -976,11 +980,8 @@ def student_page():
         db["exams"][eid]["status"] = "submitted"
         save_db(db)
         st.session_state.pop(ready_key, None)
+        st.session_state.pop(f"active_exam_{uname}", None)
         st.rerun()
-
-    # ── Pass settings to processor ─────────────────────────────────────────────
-    if ctx.video_processor:
-        ctx.video_processor.update_settings(settings)
 
     # ── Fragment: timer + metrics, never touches webrtc ───────────────────────
     @st.fragment(run_every=2)
