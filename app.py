@@ -555,18 +555,67 @@ def teacher_page():
 
     # ── Create exam ───────────────────────────────────────────────────────────
     with tab_create:
-        st.subheader("Create new exam session")
-
         students = {u: info["name"] for u, info in db["users"].items()
                     if info["role"] == "student"}
         if not students:
             st.warning("No students registered yet. Ask admin to add students.")
         else:
-            title      = st.text_input("Exam title", placeholder="e.g. Midterm Exam — Math")
+            st.subheader("Exam settings")
+            c1, c2 = st.columns(2)
+            title      = c1.text_input("Exam title", placeholder="e.g. Midterm — Math")
+            duration   = c2.number_input("Duration (minutes)", min_value=5,
+                                         max_value=180, value=30, step=5)
             student_un = st.selectbox("Assign to student",
                                       options=list(students.keys()),
                                       format_func=lambda u: f"{students[u]} ({u})")
             enable_tg  = st.checkbox("📨 Send violations to Telegram", value=True)
+
+            # ── Questions builder ──────────────────────────────────────────
+            st.divider()
+            st.subheader("📝 Test questions")
+            st.caption("Add multiple-choice questions for the student to answer during the exam.")
+
+            q_key = "draft_questions"
+            if q_key not in st.session_state:
+                st.session_state[q_key] = []
+
+            # Show existing questions
+            for i, q in enumerate(st.session_state[q_key]):
+                with st.expander(f"Q{i+1}. {q['text'][:60]}...", expanded=False):
+                    st.markdown(f"**{q['text']}**")
+                    for j, opt in enumerate(q["options"]):
+                        mark = "✅" if j == q["answer"] else f"{chr(65+j)}."
+                        st.markdown(f"{mark} {opt}")
+                    if st.button("🗑 Remove", key=f"rmq_{i}"):
+                        st.session_state[q_key].pop(i)
+                        st.rerun()
+
+            # Add new question form
+            with st.expander("➕ Add question", expanded=len(st.session_state[q_key]) == 0):
+                q_text = st.text_area("Question text", key="nq_text", height=80)
+                cols   = st.columns(2)
+                opt_a  = cols[0].text_input("Option A", key="nq_a")
+                opt_b  = cols[1].text_input("Option B", key="nq_b")
+                opt_c  = cols[0].text_input("Option C", key="nq_c")
+                opt_d  = cols[1].text_input("Option D", key="nq_d")
+                correct = st.selectbox("Correct answer", ["A","B","C","D"], key="nq_ans")
+                ans_map = {"A":0,"B":1,"C":2,"D":3}
+
+                if st.button("Add question", type="secondary"):
+                    opts = [opt_a, opt_b, opt_c, opt_d]
+                    if q_text and all(opts):
+                        st.session_state[q_key].append({
+                            "text":    q_text,
+                            "options": opts,
+                            "answer":  ans_map[correct],
+                        })
+                        st.rerun()
+                    else:
+                        st.warning("Fill in the question and all 4 options")
+
+            st.divider()
+            n_q = len(st.session_state[q_key])
+            st.caption(f"{n_q} question{'s' if n_q != 1 else ''} added")
 
             if st.button("📋 Create exam", type="primary", use_container_width=True):
                 if not title:
@@ -580,9 +629,12 @@ def teacher_page():
                         "created_at": time.strftime("%Y-%m-%d %H:%M"),
                         "status":     "pending",
                         "telegram":   enable_tg,
+                        "duration":   int(duration),
+                        "questions":  list(st.session_state[q_key]),
                         "result":     None,
                     }
-                    st.success(f"✅ Exam **{title}** created for **{students[student_un]}**")
+                    st.session_state[q_key] = []  # clear draft
+                    st.success(f"✅ **{title}** created — {int(duration)} min — {n_q} questions")
                     st.rerun()
 
     # ── Results ───────────────────────────────────────────────────────────────
@@ -594,45 +646,61 @@ def teacher_page():
         else:
             for eid, ex in my_exams.items():
                 badge_cls = f"badge-{ex['status']}"
+                n_q = len(ex.get("questions", []))
                 st.markdown(f"""<div class="exam-card">
                     <b>{ex['title']}</b> &nbsp;
                     <span class="{badge_cls}">{ex['status'].upper()}</span><br>
-                    <small>Student: <b>{ex['student']}</b>
-                    &nbsp;·&nbsp; {ex['created_at']}</small>
+                    <small>Student: <b>{ex['student']}</b> ·
+                    {ex.get('duration', '?')} min · {n_q} questions ·
+                    {ex['created_at']}</small>
                 </div>""", unsafe_allow_html=True)
 
                 if ex["status"] == "submitted" and ex.get("result"):
                     r = ex["result"]
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Avg Focus",    f"{r['avg_focus']:.0f}%")
-                    m2.metric("Min Focus",    f"{r['min_focus']:.0f}%")
-                    m3.metric("Blinks/min",   f"{r['blink_rate']:.1f}")
-                    m4.metric("Violations",   r['violations'])
-
-                    if r.get("focus_scores"):
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            y=r["focus_scores"], mode="lines",
-                            line=dict(color="#00ff9d", width=2),
-                            fill="tozeroy", fillcolor="rgba(0,255,157,0.08)"))
-                        fig.update_layout(
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            height=160, showlegend=False,
-                            margin=dict(l=0,r=0,t=4,b=0),
-                            yaxis=dict(range=[0,100], ticksuffix="%",
-                                       gridcolor="rgba(255,255,255,0.05)",
-                                       tickfont=dict(color="#aaa")),
-                            xaxis=dict(showgrid=False, showticklabels=False),
+                    # Score
+                    q_score = ""
+                    if r.get("answers") and ex.get("questions"):
+                        correct = sum(
+                            1 for i,q in enumerate(ex["questions"])
+                            if r["answers"].get(str(i)) == q["answer"]
                         )
-                        st.plotly_chart(fig, use_container_width=True,
-                                        key=f"r_{eid}")
+                        total = len(ex["questions"])
+                        q_score = f"  ·  Test: {correct}/{total}"
+
+                    m1,m2,m3,m4,m5 = st.columns(5)
+                    m1.metric("Avg Focus",  f"{r['avg_focus']:.0f}%")
+                    m2.metric("Min Focus",  f"{r['min_focus']:.0f}%")
+                    m3.metric("Blinks/min", f"{r['blink_rate']:.1f}")
+                    m4.metric("Violations", r["violations"])
+                    if r.get("answers") and ex.get("questions"):
+                        correct = sum(1 for i,q in enumerate(ex["questions"])
+                                      if r["answers"].get(str(i)) == q["answer"])
+                        m5.metric("Test score", f"{correct}/{len(ex['questions'])}")
+
+                    # Show answers
+                    if ex.get("questions") and r.get("answers"):
+                        with st.expander("📝 View answers"):
+                            for i, q in enumerate(ex["questions"]):
+                                ans_given   = r["answers"].get(str(i))
+                                ans_correct = q["answer"]
+                                ok = ans_given == ans_correct
+                                icon = "✅" if ok else "❌"
+                                st.markdown(f"**{icon} Q{i+1}. {q['text']}**")
+                                for j, opt in enumerate(q["options"]):
+                                    if j == ans_correct and j == ans_given:
+                                        st.markdown(f"&nbsp;&nbsp;✅ **{opt}** ← correct, chosen")
+                                    elif j == ans_correct:
+                                        st.markdown(f"&nbsp;&nbsp;✅ **{opt}** ← correct")
+                                    elif j == ans_given:
+                                        st.markdown(f"&nbsp;&nbsp;❌ ~~{opt}~~ ← chosen")
+                                    else:
+                                        st.markdown(f"&nbsp;&nbsp;{chr(65+j)}. {opt}")
                     st.divider()
 
                 elif ex["status"] == "pending":
                     st.caption("⏳ Waiting for student to start")
                 elif ex["status"] == "active":
-                    st.caption("🟢 Exam in progress...")
+                    st.caption("🟢 In progress...")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -673,8 +741,14 @@ def student_page():
     if not st.session_state.get(ready_key):
         _, col, _ = st.columns([1, 2, 1])
         with col:
+            duration_min = exam.get("duration", 30)
+            n_questions  = len(exam.get("questions", []))
             st.markdown(f"### 📋 {exam['title']}")
-            st.caption(f"Teacher: {exam['teacher']}  ·  Assigned: {exam['created_at']}")
+            st.caption(f"Teacher: {exam['teacher']}  ·  {exam['created_at']}")
+            st.markdown("")
+            ic1, ic2 = st.columns(2)
+            ic1.metric("⏱ Duration",   f"{duration_min} min")
+            ic2.metric("📝 Questions", str(n_questions))
             st.divider()
 
             st.markdown("**Before you begin, confirm the following:**")
@@ -710,20 +784,30 @@ def student_page():
         track_phone=True,   track_book=True, track_objects=True,
     )
 
-    # ── Tabs ───────────────────────────────────────────────────────────────────
-    tab_cam, tab_metrics = st.tabs(["🎥 Camera", "📊 Metrics"])
+    duration_min = exam.get("duration", 30)
+    duration_sec = duration_min * 60
+    questions    = exam.get("questions", [])
+
+    # Determine which tabs to show
+    tab_labels = ["🎥 Camera", "📊 Metrics"]
+    if questions:
+        tab_labels.append("📝 Test")
+    tabs = st.tabs(tab_labels)
+
+    tab_cam     = tabs[0]
+    tab_metrics = tabs[1]
+    tab_test    = tabs[2] if questions else None
 
     with tab_cam:
         col_vid, col_info = st.columns([2.4, 1])
 
         with col_vid:
-            # Video — key is stable, never changes during exam
             ctx = webrtc_streamer(
                 key=f"exam_{eid}",
                 mode=WebRtcMode.SENDRECV,
                 rtc_configuration=_get_rtc_config(),
                 media_stream_constraints={
-                    "video": {"width": {"ideal": 640},
+                    "video": {"width":  {"ideal": 640},
                               "height": {"ideal": 480},
                               "frameRate": {"ideal": 15}},
                     "audio": False,
@@ -733,63 +817,94 @@ def student_page():
             )
 
         with col_info:
-            # Timer — updates via fragment without touching webrtc
-            st.markdown("#### ⏱ Timer")
+            st.markdown("#### ⏱ Time left")
             timer_ph = st.empty()
-
             st.markdown("---")
             st.markdown("#### Status")
             status_ph = st.empty()
-
             st.markdown("---")
             st.markdown("#### Violations")
             viol_ph = st.empty()
 
-        # Submit — outside webrtc column, stable position
         st.divider()
         st.caption("⚠️ Do not close or refresh this tab until you submit.")
         if st.button("✅ Submit exam", type="primary", use_container_width=True):
-            if ctx.video_processor:
-                with ctx.video_processor._lock:
-                    d_f  = ctx.video_processor.last.copy()
-                    vlog = list(ctx.video_processor.violations_log)
-                fs = d_f["focus_scores"]
-                db["exams"][eid]["result"] = {
-                    "avg_focus":    sum(fs)/len(fs) if fs else 0,
-                    "min_focus":    min(fs) if fs else 0,
-                    "blink_rate":   d_f["blink_rate"],
-                    "violations":   len(vlog),
-                    "focus_scores": fs[-100:],
-                    "duration_s":   int(time.time() - exam_start),
-                    "submitted_at": time.strftime("%H:%M:%S"),
-                }
-            else:
-                db["exams"][eid]["result"] = {
-                    "avg_focus": 0, "min_focus": 0, "blink_rate": 0,
-                    "violations": 0, "focus_scores": [],
-                    "duration_s": 0, "submitted_at": time.strftime("%H:%M:%S"),
-                }
-            db["exams"][eid]["status"] = "submitted"
-            st.session_state.pop(ready_key, None)
-            st.success("✅ Submitted!")
-            st.rerun()
+            _do_submit()
+
+    # ── Test tab ───────────────────────────────────────────────────────────────
+    if tab_test and questions:
+        with tab_test:
+            st.subheader("📝 Answer the questions")
+            st.caption("Select one answer per question. Save before submitting.")
+
+            ans_key = f"answers_{eid}"
+            if ans_key not in st.session_state:
+                st.session_state[ans_key] = {}
+
+            for i, q in enumerate(questions):
+                st.markdown(f"**Q{i+1}. {q['text']}**")
+                opts  = [f"{chr(65+j)}. {opt}" for j, opt in enumerate(q["options"])]
+                saved = st.session_state[ans_key].get(str(i))
+                idx   = saved if saved is not None else 0
+                choice = st.radio("", opts, index=idx,
+                                  key=f"q_{eid}_{i}", horizontal=True,
+                                  label_visibility="collapsed")
+                st.session_state[ans_key][str(i)] = opts.index(choice)
+                st.markdown("")
 
     with tab_metrics:
         metrics_ph = st.empty()
+
+    # ── Submit helper ──────────────────────────────────────────────────────────
+    def _do_submit():
+        ans_key = f"answers_{eid}"
+        if ctx.video_processor:
+            with ctx.video_processor._lock:
+                d_f  = ctx.video_processor.last.copy()
+                vlog = list(ctx.video_processor.violations_log)
+            fs = d_f["focus_scores"]
+        else:
+            d_f  = {"focus_scores":[], "blink_rate":0}
+            vlog = []
+            fs   = []
+        db["exams"][eid]["result"] = {
+            "avg_focus":    sum(fs)/len(fs) if fs else 0,
+            "min_focus":    min(fs) if fs else 0,
+            "blink_rate":   d_f["blink_rate"],
+            "violations":   len(vlog),
+            "focus_scores": fs[-100:],
+            "answers":      dict(st.session_state.get(ans_key, {})),
+            "duration_s":   int(time.time() - exam_start),
+            "submitted_at": time.strftime("%H:%M:%S"),
+        }
+        db["exams"][eid]["status"] = "submitted"
+        st.session_state.pop(ready_key, None)
+        st.rerun()
 
     # ── Pass settings to processor ─────────────────────────────────────────────
     if ctx.video_processor:
         ctx.video_processor.update_settings(settings)
 
-    # ── Fragment: ONLY updates timer + metrics, never touches webrtc ───────────
-    # run_every=2 is safe because fragment doesn't rerender the camera tab
+    # ── Fragment: timer + metrics, never touches webrtc ───────────────────────
     @st.fragment(run_every=2)
     def _tick():
-        elapsed = int(time.time() - exam_start)
-        h, m, s = elapsed//3600, (elapsed%3600)//60, elapsed%60
+        elapsed   = int(time.time() - exam_start)
+        remaining = max(0, duration_sec - elapsed)
+        rm, rs    = remaining // 60, remaining % 60
+
+        # Countdown color: green → yellow → red
+        if remaining > duration_sec * 0.5:   tcol = "#00e5ff"
+        elif remaining > duration_sec * 0.2: tcol = "#ffd60a"
+        else:                                tcol = "#ff3b5c"
+
         timer_ph.markdown(
-            f"<div style='font-size:1.6rem;font-weight:700;color:#00e5ff'>"
-            f"{h:02d}:{m:02d}:{s:02d}</div>", unsafe_allow_html=True)
+            f"<div style='font-size:1.8rem;font-weight:700;color:{tcol}'>"
+            f"{rm:02d}:{rs:02d}</div>", unsafe_allow_html=True)
+
+        # Auto-submit when time is up
+        if remaining == 0:
+            _do_submit()
+            return
 
         if not ctx.video_processor:
             status_ph.caption("Start camera")
